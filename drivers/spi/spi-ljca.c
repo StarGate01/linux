@@ -274,6 +274,17 @@ static const struct dev_pm_ops ljca_spi_pm = {
 	SYSTEM_SLEEP_PM_OPS(ljca_spi_dev_suspend, ljca_spi_dev_resume)
 };
 
+static int ljca_spi_resume(struct auxiliary_device *auxdev)
+{
+	struct spi_controller *controller = auxiliary_get_drvdata(auxdev);
+	struct ljca_spi_dev *ljca_spi = spi_controller_get_devdata(controller);
+
+	ljca_spi->speed = U8_MAX;
+	ljca_spi->mode  = U8_MAX;
+
+	return 0;
+}
+
 static const struct auxiliary_device_id ljca_spi_id_table[] = {
 	{ "usb_ljca.ljca-spi", 0 },
 	{ /* sentinel */ }
@@ -284,6 +295,7 @@ static struct auxiliary_driver ljca_spi_driver = {
 	.driver.pm	= &ljca_spi_pm,
 	.probe		= ljca_spi_probe,
 	.remove		= ljca_spi_dev_remove,
+	.resume		= ljca_spi_resume,
 	.id_table	= ljca_spi_id_table,
 };
 module_auxiliary_driver(ljca_spi_driver);

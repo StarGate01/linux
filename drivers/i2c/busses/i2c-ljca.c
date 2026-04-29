@@ -322,6 +322,13 @@ static void ljca_i2c_remove(struct auxiliary_device *auxdev)
 	i2c_del_adapter(&ljca_i2c->adap);
 }
 
+static int ljca_i2c_resume(struct auxiliary_device *auxdev)
+{
+	struct ljca_i2c_dev *ljca_i2c = auxiliary_get_drvdata(auxdev);
+
+	return ljca_i2c_init(ljca_i2c, ljca_i2c->i2c_info->id);
+}
+
 static const struct auxiliary_device_id ljca_i2c_id_table[] = {
 	{ "usb_ljca.ljca-i2c", 0 },
 	{ /* sentinel */ }
@@ -331,6 +338,7 @@ MODULE_DEVICE_TABLE(auxiliary, ljca_i2c_id_table);
 static struct auxiliary_driver ljca_i2c_driver = {
 	.probe = ljca_i2c_probe,
 	.remove = ljca_i2c_remove,
+	.resume = ljca_i2c_resume,
 	.id_table = ljca_i2c_id_table,
 };
 module_auxiliary_driver(ljca_i2c_driver);

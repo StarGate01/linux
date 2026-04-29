@@ -63,6 +63,7 @@ struct ljca_gpio_dev {
 	DECLARE_BITMAP(enabled_irqs, LJCA_MAX_GPIO_NUM);
 	DECLARE_BITMAP(reenable_irqs, LJCA_MAX_GPIO_NUM);
 	DECLARE_BITMAP(output_enabled, LJCA_MAX_GPIO_NUM);
+	DECLARE_BITMAP(output_values, LJCA_MAX_GPIO_NUM);
 	u8 *connect_mode;
 	/* protect irq bus */
 	struct mutex irq_lock;
@@ -150,6 +151,7 @@ static int ljca_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
 	struct ljca_gpio_dev *ljca_gpio = gpiochip_get_data(chip);
 	int ret;
 
+	assign_bit(offset, ljca_gpio->output_values, val & 1);
 	ret = ljca_gpio_write(ljca_gpio, offset, val);
 	if (ret)
 		dev_err(chip->parent,
@@ -471,6 +473,21 @@ static void ljca_gpio_remove(struct auxiliary_device *auxdev)
 	cancel_work_sync(&ljca_gpio->work);
 }
 
+static int ljca_gpio_resume(struct auxiliary_device *auxdev)
+{
+	struct ljca_gpio_dev *ljca_gpio = auxiliary_get_drvdata(auxdev);
+	unsigned long gpio_id;
+
+	for_each_set_bit(gpio_id, ljca_gpio->output_enabled, ljca_gpio->gc.ngpio) {
+		ljca_gpio_config(ljca_gpio, gpio_id,
+				 LJCA_GPIO_CONF_OUTPUT | LJCA_GPIO_CONF_CLR);
+		ljca_gpio_write(ljca_gpio, gpio_id,
+				test_bit(gpio_id, ljca_gpio->output_values));
+	}
+
+	return 0;
+}
+
 static const struct auxiliary_device_id ljca_gpio_id_table[] = {
 	{ "usb_ljca.ljca-gpio", 0 },
 	{ /* sentinel */ },
@@ -480,6 +497,7 @@ MODULE_DEVICE_TABLE(auxiliary, ljca_gpio_id_table);
 static struct auxiliary_driver ljca_gpio_driver = {
 	.probe = ljca_gpio_probe,
 	.remove = ljca_gpio_remove,
+	.resume = ljca_gpio_resume,
 	.id_table = ljca_gpio_id_table,
 };
 module_auxiliary_driver(ljca_gpio_driver);

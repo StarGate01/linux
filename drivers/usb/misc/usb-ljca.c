@@ -880,6 +880,48 @@ static int ljca_resume(struct usb_interface *interface)
 	return usb_submit_urb(adap->rx_urb, GFP_KERNEL);
 }
 
+static int ljca_pre_reset(struct usb_interface *interface)
+{
+	struct ljca_adapter *adap = usb_get_intfdata(interface);
+
+	usb_kill_urb(adap->rx_urb);
+
+	return 0;
+}
+
+static int ljca_post_reset(struct usb_interface *interface)
+{
+	struct ljca_adapter *adap = usb_get_intfdata(interface);
+	struct ljca_client *client;
+	int ret;
+
+	ret = usb_submit_urb(adap->rx_urb, GFP_KERNEL);
+	if (ret) {
+		dev_err(adap->dev, "%s: resubmit rx URB failed: %d\n",
+			__func__, ret);
+		return ret;
+	}
+
+	list_for_each_entry(client, &adap->client_list, link) {
+		struct device *dev = &client->auxdev.dev;
+		const struct auxiliary_driver *auxdrv;
+
+		if (!dev->driver)
+			continue;
+
+		auxdrv = to_auxiliary_drv(dev->driver);
+		if (auxdrv->resume) {
+			ret = auxdrv->resume(&client->auxdev);
+			if (ret)
+				dev_err(adap->dev,
+					"%s: %s resume failed: %d\n",
+					__func__, dev_name(dev), ret);
+		}
+	}
+
+	return 0;
+}
+
 static const struct usb_device_id ljca_table[] = {
 	{ USB_DEVICE(0x8086, 0x0b63) },
 	{ /* sentinel */ }
@@ -893,6 +935,9 @@ static struct usb_driver ljca_driver = {
 	.disconnect = ljca_disconnect,
 	.suspend = ljca_suspend,
 	.resume = ljca_resume,
+	.pre_reset = ljca_pre_reset,
+	.post_reset = ljca_post_reset,
+	.reset_resume = ljca_post_reset,
 	.supports_autosuspend = 1,
 };
 module_usb_driver(ljca_driver);
