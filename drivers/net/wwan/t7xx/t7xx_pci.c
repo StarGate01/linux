@@ -647,12 +647,16 @@ static int __t7xx_pci_pm_resume(struct pci_dev *pdev, bool state_check)
 	}
 
 	ret = t7xx_send_pm_request(t7xx_dev, H2D_CH_RESUME_REQ);
-	if (ret)
-		dev_err(&pdev->dev, "[PM] MD resume error: %d\n", ret);
+	if (ret) {
+		dev_err(&pdev->dev, "[PM] MD resume error: %d, falling back to reprobe\n", ret);
+		goto reprobe;
+	}
 
 	ret = t7xx_send_pm_request(t7xx_dev, H2D_CH_RESUME_REQ_AP);
-	if (ret)
-		dev_err(&pdev->dev, "[PM] SAP resume error: %d\n", ret);
+	if (ret) {
+		dev_err(&pdev->dev, "[PM] SAP resume error: %d, falling back to reprobe\n", ret);
+		goto reprobe;
+	}
 
 	list_for_each_entry(entity, &t7xx_dev->md_pm_entities, entity) {
 		if (entity->resume) {
@@ -670,6 +674,25 @@ static int __t7xx_pci_pm_resume(struct pci_dev *pdev, bool state_check)
 	atomic_set(&t7xx_dev->md_pm_state, MTK_PM_RESUMED);
 
 	return ret;
+
+reprobe:
+	/* The modem did not acknowledge the resume handshake within the
+	 * timeout. t7xx_md_reset() (called via FSM_CMD_STOP) resets both
+	 * CLDMA controllers, so the partial hardware state set up by the
+	 * resume_early callbacks above is safely torn down before the full
+	 * D3-style reprobe restarts the modem from scratch.
+	 */
+	/* DISABLE_ASPM_LOWPWR was written unconditionally above before the
+	 * handshake; undo it here since the normal success path at line 672
+	 * is being bypassed.
+	 */
+	iowrite32(T7XX_L1_BIT(0), IREG_BASE(t7xx_dev) + ENABLE_ASPM_LOWPWR);
+	pm_runtime_mark_last_busy(&pdev->dev);
+	ret = t7xx_pci_reprobe_early(t7xx_dev);
+	if (ret)
+		return ret;
+
+	return t7xx_pci_reprobe(t7xx_dev, true);
 }
 
 static int t7xx_pci_pm_resume_noirq(struct device *dev)
@@ -717,6 +740,22 @@ static int t7xx_pci_pm_thaw(struct device *dev)
 	return __t7xx_pci_pm_resume(to_pci_dev(dev), false);
 }
 
+static int t7xx_pci_pm_freeze(struct device *dev)
+{
+	/* The modem will lose power when hibernate completes; abort_suspend()
+	 * already restored clean driver state, so let the freeze succeed
+	 * regardless of modem state and rely on the restore path to reprobe.
+	 */
+	__t7xx_pci_pm_suspend(to_pci_dev(dev));
+	return 0;
+}
+
+static int t7xx_pci_pm_poweroff(struct device *dev)
+{
+	__t7xx_pci_pm_suspend(to_pci_dev(dev));
+	return 0;
+}
+
 static int t7xx_pci_pm_runtime_suspend(struct device *dev)
 {
 	return __t7xx_pci_pm_suspend(to_pci_dev(dev));
@@ -732,9 +771,9 @@ static const struct dev_pm_ops t7xx_pci_pm_ops = {
 	.suspend = t7xx_pci_pm_suspend,
 	.resume = t7xx_pci_pm_resume,
 	.resume_noirq = t7xx_pci_pm_resume_noirq,
-	.freeze = t7xx_pci_pm_suspend,
+	.freeze = t7xx_pci_pm_freeze,
 	.thaw = t7xx_pci_pm_thaw,
-	.poweroff = t7xx_pci_pm_suspend,
+	.poweroff = t7xx_pci_pm_poweroff,
 	.restore = t7xx_pci_pm_resume,
 	.restore_noirq = t7xx_pci_pm_resume_noirq,
 	.runtime_suspend = t7xx_pci_pm_runtime_suspend,
