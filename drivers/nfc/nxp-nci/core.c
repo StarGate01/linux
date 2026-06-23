@@ -20,6 +20,10 @@
 
 #define NXP_NCI_HDR_LEN	4
 
+#define NXP_NCI_VENDOR_OUI		0x006037  /* NXP Semiconductors */
+#define NXP_NCI_SUBCMD_CORE_SET_CONFIG	0
+#define NXP_NCI_SUBCMD_PROP_CMD		1
+
 #define NXP_NCI_NFC_PROTOCOLS (NFC_PROTO_JEWEL_MASK | \
 			       NFC_PROTO_MIFARE_MASK | \
 			       NFC_PROTO_FELICA_MASK | \
@@ -111,6 +115,40 @@ static int nxp_nci_rf_txldo_error_ntf(struct nci_dev *ndev,
 	return 0;
 }
 
+static int nxp_nci_vendor_core_set_config(struct nfc_dev *dev, void *data,
+					  size_t data_len)
+{
+	struct nci_dev *ndev = nfc_get_drvdata(dev);
+
+	return nci_core_cmd(ndev, NCI_OP_CORE_SET_CONFIG_CMD, data_len, data);
+}
+
+static int nxp_nci_vendor_prop_cmd(struct nfc_dev *dev, void *data,
+				   size_t data_len)
+{
+	struct nci_dev *ndev = nfc_get_drvdata(dev);
+	const __u8 *buf = data;
+
+	if (data_len < 1)
+		return -EINVAL;
+
+	/* buf[0] is the NCI OID; remainder is the payload */
+	return nci_prop_cmd(ndev, buf[0], data_len - 1, buf + 1);
+}
+
+static const struct nfc_vendor_cmd nxp_nci_vendor_cmds[] = {
+	{
+		.vendor_id = NXP_NCI_VENDOR_OUI,
+		.subcmd = NXP_NCI_SUBCMD_CORE_SET_CONFIG,
+		.doit = nxp_nci_vendor_core_set_config,
+	},
+	{
+		.vendor_id = NXP_NCI_VENDOR_OUI,
+		.subcmd = NXP_NCI_SUBCMD_PROP_CMD,
+		.doit = nxp_nci_vendor_prop_cmd,
+	},
+};
+
 static const struct nci_driver_ops nxp_nci_core_ops[] = {
 	{
 		.opcode = NXP_NCI_RF_PLL_UNLOCKED_NTF,
@@ -122,6 +160,17 @@ static const struct nci_driver_ops nxp_nci_core_ops[] = {
 	},
 };
 
+static int nxp_nci_prop_rsp(struct nci_dev *ndev, struct sk_buff *skb)
+{
+	nci_req_complete(ndev, skb->data[0]);
+	return 0;
+}
+
+static const struct nci_driver_ops nxp_nci_prop_ops[] = {
+	{ .opcode = nci_opcode_pack(NCI_GID_PROPRIETARY, 0x00), .rsp = nxp_nci_prop_rsp },
+	{ .opcode = nci_opcode_pack(NCI_GID_PROPRIETARY, 0x02), .rsp = nxp_nci_prop_rsp },
+};
+
 static const struct nci_ops nxp_nci_ops = {
 	.open = nxp_nci_open,
 	.close = nxp_nci_close,
@@ -129,6 +178,8 @@ static const struct nci_ops nxp_nci_ops = {
 	.fw_download = nxp_nci_fw_download,
 	.core_ops = nxp_nci_core_ops,
 	.n_core_ops = ARRAY_SIZE(nxp_nci_core_ops),
+	.prop_ops = nxp_nci_prop_ops,
+	.n_prop_ops = ARRAY_SIZE(nxp_nci_prop_ops),
 };
 
 int nxp_nci_probe(void *phy_id, struct device *pdev,
@@ -138,6 +189,8 @@ int nxp_nci_probe(void *phy_id, struct device *pdev,
 {
 	struct nxp_nci_info *info;
 	int r;
+
+	BUILD_BUG_ON(ARRAY_SIZE(nxp_nci_prop_ops) > NCI_MAX_PROPRIETARY_CMD);
 
 	info = devm_kzalloc(pdev, sizeof(struct nxp_nci_info), GFP_KERNEL);
 	if (!info)
@@ -166,6 +219,8 @@ int nxp_nci_probe(void *phy_id, struct device *pdev,
 
 	nci_set_parent_dev(info->ndev, pdev);
 	nci_set_drvdata(info->ndev, info);
+	nci_set_vendor_cmds(info->ndev, nxp_nci_vendor_cmds,
+			    ARRAY_SIZE(nxp_nci_vendor_cmds));
 	r = nci_register_device(info->ndev);
 	if (r < 0) {
 		nci_free_device(info->ndev);
