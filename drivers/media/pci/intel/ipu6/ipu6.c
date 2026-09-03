@@ -782,9 +782,25 @@ static int ipu6_resume(struct device *dev)
 		return 0;
 	}
 
-	ret = ipu6_buttress_authenticate(isp);
-	if (ret)
-		dev_err(&isp->pdev->dev, "FW authentication failed(%d)\n", ret);
+	/*
+	 * If the CSE was cold-reset (S4) the FW must be re-authenticated, which
+	 * makes the CSE fetch the package directory through the PSYS MMU; its HW
+	 * page-table base is lost on power-off, so reprogram it first as
+	 * ipu6_pci_probe() does around the initial authentication.
+	 */
+	if (!ipu6_buttress_auth_done(isp)) {
+		ret = ipu6_mmu_hw_init(isp->psys->mmu);
+		if (ret) {
+			dev_err(&isp->pdev->dev,
+				"Failed to reinit PSYS MMU on resume (%d)\n", ret);
+		} else {
+			ret = ipu6_buttress_authenticate(isp);
+			if (ret)
+				dev_err(&isp->pdev->dev,
+					"FW authentication failed(%d)\n", ret);
+			ipu6_mmu_hw_cleanup(isp->psys->mmu);
+		}
+	}
 
 	pm_runtime_put(&isp->psys->auxdev.dev);
 
