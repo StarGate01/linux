@@ -20,6 +20,14 @@
 
 #define NXP_NCI_HDR_LEN	4
 
+#define NXP_NCI_VENDOR_OUI		0x006037  /* NXP Semiconductors */
+#define NXP_NCI_SUBCMD_CORE_SET_CONFIG	0
+#define NXP_NCI_SUBCMD_PROP_CMD		1
+
+/* Proprietary (NCI_GID_PROPRIETARY) OIDs, named as in NXP's own stack. */
+#define NXP_NCI_PROP_SET_POWERMGT	0x00
+#define NXP_NCI_PROP_PROPRIETARY_ACT	0x02
+
 #define NXP_NCI_NFC_PROTOCOLS (NFC_PROTO_JEWEL_MASK | \
 			       NFC_PROTO_MIFARE_MASK | \
 			       NFC_PROTO_FELICA_MASK | \
@@ -111,6 +119,110 @@ static int nxp_nci_rf_txldo_error_ntf(struct nci_dev *ndev,
 	return 0;
 }
 
+static int nxp_nci_prop_rsp(struct nci_dev *ndev, struct sk_buff *skb)
+{
+	nci_req_complete(ndev, skb->data[0]);
+	return 0;
+}
+
+static const struct nci_driver_ops nxp_nci_prop_ops[] = {
+	{
+		.opcode = nci_opcode_pack(NCI_GID_PROPRIETARY,
+					  NXP_NCI_PROP_SET_POWERMGT),
+		.rsp = nxp_nci_prop_rsp,
+	},
+	{
+		.opcode = nci_opcode_pack(NCI_GID_PROPRIETARY,
+					  NXP_NCI_PROP_PROPRIETARY_ACT),
+		.rsp = nxp_nci_prop_rsp,
+	},
+};
+
+/*
+ * Responses are dispatched by exact opcode match (ops_cmd_lookup()), and the
+ * NCI core has no catch-all. A proprietary command whose OID has no entry
+ * above therefore never reaches nci_req_complete(): it waits out the full
+ * NCI_CMD_TIMEOUT holding req_lock, blocking every other request on the
+ * device for that long. Refuse those rather than issue them, deriving the
+ * answer from the table itself so it cannot drift out of sync with it.
+ */
+static bool nxp_nci_prop_oid_supported(__u8 oid)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(nxp_nci_prop_ops); i++)
+		if (nci_opcode_oid(nxp_nci_prop_ops[i].opcode) == oid)
+			return true;
+
+	return false;
+}
+
+/*
+ * nci_core_cmd()/nci_prop_cmd() call __nci_request() directly and skip both
+ * the serialization (ndev->req_lock) and the NCI_UP check that nci_request()
+ * normally provides. That is fine for the driver's own init sequence, which
+ * is single-threaded and only runs before/around nci_core_init(), but these
+ * vendor doit callbacks can be invoked from netlink at any time, including
+ * concurrently with other NCI requests (e.g. poll start/stop) or while the
+ * device is down. Take the same lock and check nci_request() does to avoid
+ * corrupting pending-request state or wedging on a down device.
+ */
+static int nxp_nci_vendor_core_set_config(struct nfc_dev *dev, void *data,
+					  size_t data_len)
+{
+	struct nci_dev *ndev = nfc_get_drvdata(dev);
+	int rc;
+
+	if (data_len == 0 || data_len > NCI_MAX_PAYLOAD_SIZE)
+		return -EINVAL;
+
+	mutex_lock(&ndev->req_lock);
+	if (test_bit(NCI_UP, &ndev->flags))
+		rc = nci_core_cmd(ndev, NCI_OP_CORE_SET_CONFIG_CMD, data_len, data);
+	else
+		rc = -ENETDOWN;
+	mutex_unlock(&ndev->req_lock);
+
+	return rc;
+}
+
+static int nxp_nci_vendor_prop_cmd(struct nfc_dev *dev, void *data,
+				   size_t data_len)
+{
+	struct nci_dev *ndev = nfc_get_drvdata(dev);
+	const __u8 *buf = data;
+	int rc;
+
+	if (data_len < 1 || data_len - 1 > NCI_MAX_PAYLOAD_SIZE)
+		return -EINVAL;
+
+	/* buf[0] is the NCI OID, the remainder is the payload. */
+	if (!nxp_nci_prop_oid_supported(buf[0]))
+		return -EOPNOTSUPP;
+
+	mutex_lock(&ndev->req_lock);
+	if (test_bit(NCI_UP, &ndev->flags))
+		rc = nci_prop_cmd(ndev, buf[0], data_len - 1, buf + 1);
+	else
+		rc = -ENETDOWN;
+	mutex_unlock(&ndev->req_lock);
+
+	return rc;
+}
+
+static const struct nfc_vendor_cmd nxp_nci_vendor_cmds[] = {
+	{
+		.vendor_id = NXP_NCI_VENDOR_OUI,
+		.subcmd = NXP_NCI_SUBCMD_CORE_SET_CONFIG,
+		.doit = nxp_nci_vendor_core_set_config,
+	},
+	{
+		.vendor_id = NXP_NCI_VENDOR_OUI,
+		.subcmd = NXP_NCI_SUBCMD_PROP_CMD,
+		.doit = nxp_nci_vendor_prop_cmd,
+	},
+};
+
 static const struct nci_driver_ops nxp_nci_core_ops[] = {
 	{
 		.opcode = NXP_NCI_RF_PLL_UNLOCKED_NTF,
@@ -129,6 +241,8 @@ static const struct nci_ops nxp_nci_ops = {
 	.fw_download = nxp_nci_fw_download,
 	.core_ops = nxp_nci_core_ops,
 	.n_core_ops = ARRAY_SIZE(nxp_nci_core_ops),
+	.prop_ops = nxp_nci_prop_ops,
+	.n_prop_ops = ARRAY_SIZE(nxp_nci_prop_ops),
 };
 
 int nxp_nci_probe(void *phy_id, struct device *pdev,
@@ -138,6 +252,8 @@ int nxp_nci_probe(void *phy_id, struct device *pdev,
 {
 	struct nxp_nci_info *info;
 	int r;
+
+	BUILD_BUG_ON(ARRAY_SIZE(nxp_nci_prop_ops) > NCI_MAX_PROPRIETARY_CMD);
 
 	info = devm_kzalloc(pdev, sizeof(struct nxp_nci_info), GFP_KERNEL);
 	if (!info)
@@ -166,6 +282,12 @@ int nxp_nci_probe(void *phy_id, struct device *pdev,
 
 	nci_set_parent_dev(info->ndev, pdev);
 	nci_set_drvdata(info->ndev, info);
+	r = nci_set_vendor_cmds(info->ndev, nxp_nci_vendor_cmds,
+				ARRAY_SIZE(nxp_nci_vendor_cmds));
+	if (r < 0) {
+		nci_free_device(info->ndev);
+		return r;
+	}
 	r = nci_register_device(info->ndev);
 	if (r < 0) {
 		nci_free_device(info->ndev);
