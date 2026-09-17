@@ -1508,6 +1508,13 @@ static bool nci_valid_size(struct sk_buff *skb)
 		    nci_mt(skb->data) == NCI_MT_NTF_PKT)
 			return true;
 
+		/* Allow zero length data packets. An empty ISO-DEP I-block is
+		 * a valid response, and is what the ISO 14443-4 presence check
+		 * is built on.
+		 */
+		if (nci_mt(skb->data) == NCI_MT_DATA_PKT)
+			return true;
+
 		/* Disallow zero length otherwise. */
 		return false;
 	}

@@ -295,6 +295,17 @@ void nci_rx_data_packet(struct nci_dev *ndev, struct sk_buff *skb)
 	    ndev->target_active_prot == NFC_PROTO_JEWEL ||
 	    ndev->target_active_prot == NFC_PROTO_FELICA ||
 	    ndev->target_active_prot == NFC_PROTO_ISO15693) {
+		/* The frame interface always appends a status byte, so a zero
+		 * length payload is malformed here and must not be parsed.
+		 * Fail the pending exchange rather than dropping the packet,
+		 * which would leave the caller waiting out the data timeout.
+		 */
+		if (!skb->len) {
+			kfree_skb(skb);
+			nci_data_exchange_complete(ndev, NULL, conn_id, -EPROTO);
+			return;
+		}
+
 		/* frame I/F => remove the status byte */
 		pr_debug("frame I/F => remove the status byte\n");
 		status = skb->data[skb->len - 1];
